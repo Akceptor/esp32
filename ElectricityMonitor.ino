@@ -9,8 +9,8 @@
 const char* ssid = "MyWifi";
 const char* password = "12345678";
 
-#define BOTtoken "7024081855:AAFvuyT_xbxdSlDSm_eqHUhUNr2XWe9i-i0"
-#define CHAT_ID "-4570930454"
+#define BOTtoken "XXX:YYY"
+#define CHAT_ID "-12345"
 #define PWR_GPIO 5
 
 WiFiClientSecure client;
