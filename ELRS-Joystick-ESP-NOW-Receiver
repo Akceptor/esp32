@@ -1,0 +1,79 @@
+#include <HardwareSerial.h>
+#include <BleGamepad.h>
+#include <esp_now.h>
+#include <WiFi.h>
+
+BleGamepad bleGamepad("ELRS Joystick", "DIY", 42);
+
+// DTO
+typedef struct esp_now_msg {
+  int joy1;
+  int joy2;
+  int joy3;
+  int joy4;
+  bool armed;
+} esp_now_msg;
+
+esp_now_msg channelsData;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("------------------");
+  
+  // Initialize BLE Gamepad
+  bleGamepad.begin();
+  
+  // Initialize Wi-Fi
+  WiFi.mode(WIFI_STA);
+  delay(1000);  // Add delay for proper initialization
+  Serial.println("Receiver MAC: " + WiFi.macAddress());
+
+  // Initialize ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  
+  // Register the receive callback function
+  esp_now_register_recv_cb(OnDataRecv);
+
+  Serial.println("--- RECEIVER READY ---");
+}
+
+void loop() {
+  // Add any background processing here if needed
+}
+
+void OnDataRecv(const esp_now_recv_info* info, const uint8_t* incomingData, int len) {
+  // Validate the received data length
+  if (len == sizeof(channelsData)) {
+    memcpy(&channelsData, incomingData, sizeof(channelsData));
+    
+    Serial.println("Data received from: " + String(info->src_addr[0], HEX) + ":" +
+                   String(info->src_addr[1], HEX) + ":" +
+                   String(info->src_addr[2], HEX) + ":" +
+                   String(info->src_addr[3], HEX) + ":" +
+                   String(info->src_addr[4], HEX) + ":" +
+                   String(info->src_addr[5], HEX));
+    Serial.println("Bytes received: " + String(len));
+    
+    if (bleGamepad.isConnected()) {
+      Serial.println("BLE Gamepad connected. Updating axes.");
+      
+      // Set joystick axes and buttons
+      bleGamepad.setAxes(channelsData.joy1, channelsData.joy2, channelsData.joy3, channelsData.joy4, 32767, 32767, 32767, 32767);
+      
+      // Handle button press based on "armed" state
+      if (channelsData.armed) {
+        bleGamepad.press(BUTTON_1);
+      } else {
+        bleGamepad.release(BUTTON_1);
+      }
+    } else {
+      Serial.println("BLE Gamepad not connected");
+    }
+  } else {
+    Serial.println("Received incorrect data size");
+  }
+}
