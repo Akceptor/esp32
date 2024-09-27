@@ -1,0 +1,114 @@
+// https://github.com/AlfredoSystems/AlfredoCRSF
+#include <AlfredoCRSF.h>
+#include <HardwareSerial.h>
+#include <esp_now.h>
+#include <WiFi.h>
+
+#define PIN_RX 20
+#define PIN_TX 21
+
+// Set up a new Serial object
+HardwareSerial crsfSerial(1);
+AlfredoCRSF crsf;
+
+//DTO
+typedef struct esp_now_msg {
+  int joy1;
+  int joy2;
+  int joy3;
+  int joy4;
+  bool armed;
+} esp_now_msg;
+
+esp_now_msg channelsData;
+
+esp_now_peer_info_t peerInfo;
+
+// C4:D8:D5:96:09:34 - receiver MAC address
+uint8_t broadcastAddress[] = {0xC4, 0xD8, 0xD5, 0x96, 0x09, 0x34};
+
+void setup() {
+  crsfSerial.begin(CRSF_BAUDRATE, SERIAL_8N1, PIN_RX, PIN_TX);
+  Serial.begin(115200);
+  Serial.println("------------------");
+  crsf.begin(crsfSerial);
+  WiFi.mode(WIFI_STA);
+
+  // Init ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+
+  // Once ESPNow is successfully Init, we will register for Send CB to
+  // get the status of Transmitted packet
+  esp_now_register_send_cb(OnDataSent);
+  Serial.println(WiFi.macAddress());
+
+  // Register peer
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  // Add peer
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add peer");
+    return;
+  }
+  Serial.println("--- SENDER READY ---");
+}
+
+void loop() {
+  crsf.update();
+  printChannels();
+  int axis1 = crsf.getChannel(1);
+  int axis2 = crsf.getChannel(2);
+  int axis3 = crsf.getChannel(3);
+  int axis4 = crsf.getChannel(4);
+
+  int joy1 = mapValue(axis1);
+  int joy2 = mapValue(axis2);
+  int joy3 = mapValue(axis3);
+  int joy4 = mapValue(axis4);
+
+  channelsData.joy1 = joy1;
+  channelsData.joy2 = joy2;
+  channelsData.joy3 = joy3;
+  channelsData.joy4 = joy4;
+  channelsData.armed = crsf.getChannel(5) > 1500;
+
+  esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)&channelsData, sizeof(channelsData));
+
+  if (result == ESP_OK) {
+    Serial.println("Sent with success");
+  } else {
+    Serial.println("Error sending the data");
+  }
+  delay(100);
+}
+
+int mapValue(int input) {
+  // Define the input and output ranges
+  int input_min = 989;
+  int input_max = 2011;
+  int output_min = 0;
+  int output_max = 32767;
+
+  // Perform the mapping
+  int output = (input - input_min) * (output_max - output_min) / (input_max - input_min) + output_min;
+
+  return output;
+}
+
+void printChannels() {
+  for (int ChannelNum = 1; ChannelNum <= 16; ChannelNum++) {
+    Serial.print(crsf.getChannel(ChannelNum));
+    Serial.print(", ");
+  }
+  Serial.println(" ");
+}
+
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("\r\nLast Packet Send Status:\t");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+}
