@@ -1,6 +1,8 @@
 #include <Arduino.h>
+//https://github.com/AlfredoSystems/AlfredoCRSF
 #include <AlfredoCRSF.h>
 #include <HardwareSerial.h>
+//https://github.com/AlessandroAU/ESP32-CRSF-Packet-Gen
 #include <CRSF.h>
 
 #define CRSFinterval 5000 //in ms
@@ -8,13 +10,17 @@
 
 CRSF crsf;
 
+#define CRSF_CHANNEL_VALUE_MIN 172
+#define CRSF_CHANNEL_VALUE_MID 992
+#define CRSF_CHANNEL_VALUE_MAX 1811
+
 #define PIN_RX_IN1 18
 #define PIN_TX_IN1 19
 
 #define PIN_RX_IN2 25
 #define PIN_TX_IN2 26
 
-// These are  from CRSF.cpp - hardcoded for now
+// These are from CRSF.cpp - hardcoded for now
 #define PIN_RX_OUT 16
 #define PIN_TX_OUT 17
 
@@ -49,7 +55,6 @@ void loop() {
   crsfIn1.update();
   crsfIn2.update();
 
-  //printChannels(crsfIn1, crsfIn2);
   if (crsfIn1.isLinkUp()) {
     sendChannels(crsfIn1, crsf);
   } else if (crsfIn2.isLinkUp()) {
@@ -83,27 +88,4 @@ void sendChannels(AlfredoCRSF crsf_in, CRSF crsf_out) {
   crsf.PackedRCdataOut.ch14 = crsf_in.getChannel(15);
   crsf.PackedRCdataOut.ch15 = crsf_in.getChannel(16);
   crsf.sendRCFrameToFC();
-}
-
-void printChannels(AlfredoCRSF crsf1, AlfredoCRSF crsf2) {
-  if (crsf1.isLinkUp()) {
-    // First RX linked. Reading data
-    for (int ChannelNum = 1; ChannelNum <= 5; ChannelNum++) {
-      Serial.print(crsf1.getChannel(ChannelNum));
-      Serial.print(", ");
-    }
-  }
-  Serial.print(" ||| ");
-  if (crsf2.isLinkUp()) {
-    // First RX linked. Reading data
-    for (int ChannelNum = 1; ChannelNum <= 5; ChannelNum++) {
-      Serial.print(crsf2.getChannel(ChannelNum));
-      Serial.print(", ");
-    }
-  }
-  Serial.print(" ||| Link1: ");
-  Serial.print(crsf1.isLinkUp());
-  Serial.print(" ||| Link2: ");
-  Serial.print(crsf2.isLinkUp());
-  Serial.println(" ");
 }
