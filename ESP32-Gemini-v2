@@ -1,0 +1,109 @@
+#include <Arduino.h>
+#include <AlfredoCRSF.h>
+#include <HardwareSerial.h>
+#include <CRSF.h>
+
+#define CRSFinterval 5000 //in ms
+#define uartCRSFinverted false
+
+CRSF crsf;
+
+#define PIN_RX_IN1 18
+#define PIN_TX_IN1 19
+
+#define PIN_RX_IN2 25
+#define PIN_TX_IN2 26
+
+// These are  from CRSF.cpp - hardcoded for now
+#define PIN_RX_OUT 16
+#define PIN_TX_OUT 17
+
+// Set up a new Serial object
+HardwareSerial crsfSerialIn1(1);
+AlfredoCRSF crsfIn1;
+
+HardwareSerial crsfSerialIn2(0);
+AlfredoCRSF crsfIn2;
+
+void sendChannels(AlfredoCRSF crsf_in, CRSF crsf_out);
+void printChannels(AlfredoCRSF crsf1, AlfredoCRSF crsf2);
+
+void setup() {
+  crsfSerialIn1.begin(CRSF_BAUDRATE, SERIAL_8N1, PIN_RX_IN1, PIN_TX_IN1);
+  delay(1000);
+  crsfSerialIn2.begin(CRSF_BAUDRATE, SERIAL_8N1, PIN_RX_IN2, PIN_TX_IN2);
+  crsfIn1.begin(crsfSerialIn1);
+  delay (1000);
+  crsfIn2.begin(crsfSerialIn2);
+  delay (1000);
+  crsf.Begin();
+  crsf.PackedRCdataOut.ch0 = CRSF_CHANNEL_VALUE_MIN;
+  crsf.PackedRCdataOut.ch1 = CRSF_CHANNEL_VALUE_MIN;
+  crsf.PackedRCdataOut.ch2 = CRSF_CHANNEL_VALUE_MIN;
+  crsf.PackedRCdataOut.ch3 = CRSF_CHANNEL_VALUE_MIN;
+  crsf.PackedRCdataOut.ch4 = CRSF_CHANNEL_VALUE_MIN;
+  crsf.sendRCFrameToFC();
+}
+
+void loop() {
+  crsfIn1.update();
+  crsfIn2.update();
+
+  //printChannels(crsfIn1, crsfIn2);
+  if (crsfIn1.isLinkUp()) {
+    sendChannels(crsfIn1, crsf);
+  } else if (crsfIn2.isLinkUp()) {
+    sendChannels(crsfIn2, crsf);
+  } else {
+    // Failsafe
+    crsf.PackedRCdataOut.ch0 = CRSF_CHANNEL_VALUE_MID;
+    crsf.PackedRCdataOut.ch1 = CRSF_CHANNEL_VALUE_MID;
+    crsf.PackedRCdataOut.ch2 = CRSF_CHANNEL_VALUE_MID;
+    crsf.PackedRCdataOut.ch3 = CRSF_CHANNEL_VALUE_MID;
+    crsf.PackedRCdataOut.ch4 = CRSF_CHANNEL_VALUE_MAX;
+    crsf.sendRCFrameToFC();
+  }
+}
+
+void sendChannels(AlfredoCRSF crsf_in, CRSF crsf_out) {
+  crsf.PackedRCdataOut.ch0 = crsf_in.getChannel(1);
+  crsf.PackedRCdataOut.ch1 = crsf_in.getChannel(2);
+  crsf.PackedRCdataOut.ch2 = crsf_in.getChannel(3);
+  crsf.PackedRCdataOut.ch3 = crsf_in.getChannel(4);
+  crsf.PackedRCdataOut.ch4 = crsf_in.getChannel(5);
+  crsf.PackedRCdataOut.ch5 = crsf_in.getChannel(6);
+  crsf.PackedRCdataOut.ch6 = crsf_in.getChannel(7);
+  crsf.PackedRCdataOut.ch7 = crsf_in.getChannel(8);
+  crsf.PackedRCdataOut.ch8 = crsf_in.getChannel(9);
+  crsf.PackedRCdataOut.ch9 = crsf_in.getChannel(10);
+  crsf.PackedRCdataOut.ch10 = crsf_in.getChannel(11);
+  crsf.PackedRCdataOut.ch11 = crsf_in.getChannel(12);
+  crsf.PackedRCdataOut.ch12 = crsf_in.getChannel(13);
+  crsf.PackedRCdataOut.ch13 = crsf_in.getChannel(14);
+  crsf.PackedRCdataOut.ch14 = crsf_in.getChannel(15);
+  crsf.PackedRCdataOut.ch15 = crsf_in.getChannel(16);
+  crsf.sendRCFrameToFC();
+}
+
+void printChannels(AlfredoCRSF crsf1, AlfredoCRSF crsf2) {
+  if (crsf1.isLinkUp()) {
+    // First RX linked. Reading data
+    for (int ChannelNum = 1; ChannelNum <= 5; ChannelNum++) {
+      Serial.print(crsf1.getChannel(ChannelNum));
+      Serial.print(", ");
+    }
+  }
+  Serial.print(" ||| ");
+  if (crsf2.isLinkUp()) {
+    // First RX linked. Reading data
+    for (int ChannelNum = 1; ChannelNum <= 5; ChannelNum++) {
+      Serial.print(crsf2.getChannel(ChannelNum));
+      Serial.print(", ");
+    }
+  }
+  Serial.print(" ||| Link1: ");
+  Serial.print(crsf1.isLinkUp());
+  Serial.print(" ||| Link2: ");
+  Serial.print(crsf2.isLinkUp());
+  Serial.println(" ");
+}
