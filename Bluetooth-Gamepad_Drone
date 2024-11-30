@@ -1,0 +1,248 @@
+#include <Bluepad32.h>
+#include <ezLED.h>
+#include <AlfredoCRSF.h>
+
+ControllerPtr myControllers[BP32_MAX_GAMEPADS];
+
+#define LED_PIN 14
+ezLED led(LED_PIN);
+
+#define PIN_RX_OUT 18
+#define PIN_TX_OUT 19
+
+HardwareSerial crsfSerialOut(1);
+AlfredoCRSF crsfOut;
+
+const uint16_t BUTTON_LEFT_MASK = 0x0001;
+const uint16_t BUTTON_RIGHT_MASK = 0x0002;
+
+unsigned int convertToCRSF(int input, bool isInverted) {
+    // Clamp input to the -511 to 512 range
+    if (input < -511) {
+        input = -511;
+    } else if (input > 512) {
+        input = 512;
+    }
+    
+    // Calculate output based on the isInverted flag
+    unsigned int output;
+    if (isInverted) {
+        // Invert the output calculation
+        output = static_cast<unsigned int>(1792 - (input + 511) * (1792 - 191) / 1023);
+    } else {
+        // Normal calculation
+        output = static_cast<unsigned int>(191 + (input + 511) * (1792 - 191) / 1023);
+    }
+    
+    return output;
+}
+
+bool isArmed = false;
+bool isMode = false;
+
+void sendChannels(int lX, int lY, int rX, int rY, uint16_t buttons) {
+  crsf_channels_t crsfChannels = { 0 };
+  crsfChannels.ch0 = convertToCRSF(lY, true);
+  crsfChannels.ch1 = convertToCRSF(lX, false);
+  crsfChannels.ch2 = convertToCRSF(rY, true);
+  crsfChannels.ch3 = convertToCRSF(rX, false);
+
+  if (buttons & BUTTON_TRIGGER_L) {
+    isArmed = !isArmed;
+  }
+
+  if (buttons & BUTTON_TRIGGER_R) {
+    isMode = !isMode;
+  }
+
+  if ((buttons & BUTTON_LEFT_MASK)|isArmed) { //ARM
+      crsfChannels.ch4 = CRSF_CHANNEL_VALUE_2000;
+  } else {
+    crsfChannels.ch4 = CRSF_CHANNEL_VALUE_1000;
+  }
+
+  if ((buttons & BUTTON_RIGHT_MASK)|!isMode) { //MODE
+      crsfChannels.ch5 = CRSF_CHANNEL_VALUE_2000;
+  } else {
+    crsfChannels.ch5 = CRSF_CHANNEL_VALUE_1000;
+  }
+  
+  crsfChannels.ch6 = CRSF_CHANNEL_VALUE_1000;
+  crsfChannels.ch7 = CRSF_CHANNEL_VALUE_1000;
+  crsfChannels.ch8 = CRSF_CHANNEL_VALUE_1000;
+  crsfChannels.ch9 = CRSF_CHANNEL_VALUE_1000;
+  crsfChannels.ch10 = CRSF_CHANNEL_VALUE_1000;
+  crsfChannels.ch11 = CRSF_CHANNEL_VALUE_1000;
+  crsfChannels.ch12 = CRSF_CHANNEL_VALUE_1000;
+  crsfChannels.ch13 = CRSF_CHANNEL_VALUE_1000;
+  crsfChannels.ch14 = CRSF_CHANNEL_VALUE_1000;
+  crsfChannels.ch15 = CRSF_CHANNEL_VALUE_1000;
+
+  Serial.print("Throttle: ");
+  Serial.print(crsfChannels.ch0);
+  Serial.print(", Yaw: ");
+  Serial.print(crsfChannels.ch1);
+  Serial.print(", Pitch: ");
+  Serial.print(crsfChannels.ch2);
+  Serial.print(", Roll: ");
+  Serial.print(crsfChannels.ch3);
+  Serial.print(", ARM: ");
+  Serial.print(crsfChannels.ch4);
+  Serial.print(", MODE: ");
+  Serial.println(crsfChannels.ch5);
+  Serial.println("");
+
+
+
+  crsfOut.writePacket(CRSF_SYNC_BYTE, CRSF_FRAMETYPE_RC_CHANNELS_PACKED, &crsfChannels, sizeof(crsfChannels));
+}
+
+// This callback gets called any time a new gamepad is connected.
+// Up to 4 gamepads can be connected at the same time.
+void onConnectedController(ControllerPtr ctl) {
+    bool foundEmptySlot = false;
+    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+        if (myControllers[i] == nullptr) {
+            Serial.printf("CALLBACK: Controller is connected, index=%d\n", i);
+            // Additionally, you can get certain gamepad properties like:
+            // Model, VID, PID, BTAddr, flags, etc.
+            ControllerProperties properties = ctl->getProperties();
+            Serial.printf("Controller model: %s, VID=0x%04x, PID=0x%04x\n", ctl->getModelName().c_str(), properties.vendor_id,
+                           properties.product_id);
+            myControllers[i] = ctl;
+            foundEmptySlot = true;
+            break;
+        }
+    }
+    if (!foundEmptySlot) {
+        Serial.println("CALLBACK: Controller connected, but could not found empty slot");
+    }
+}
+
+void onDisconnectedController(ControllerPtr ctl) {
+    bool foundController = false;
+    led.turnOFF();
+
+    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+        if (myControllers[i] == ctl) {
+            Serial.printf("CALLBACK: Controller disconnected from index=%d\n", i);
+            myControllers[i] = nullptr;
+            foundController = true;
+            break;
+        }
+    }
+
+    if (!foundController) {
+        Serial.println("CALLBACK: Controller disconnected, but not found in myControllers");
+    }
+}
+
+// Cached CRSF channels to be sent
+crsf_channels_t cachedCrsfChannels = {0};
+
+// Update and cache CRSF channels only if a button is pressed
+void updateChannels(int lX, int lY, int rX, int rY, uint16_t buttons) {
+    cachedCrsfChannels.ch0 = convertToCRSF(lY, true);
+    cachedCrsfChannels.ch1 = convertToCRSF(lX, false);
+    cachedCrsfChannels.ch2 = convertToCRSF(rY, true);
+    cachedCrsfChannels.ch3 = convertToCRSF(rX, false);
+
+    if (buttons & BUTTON_TRIGGER_L) {
+        isArmed = !isArmed;
+    }
+
+    if (buttons & BUTTON_TRIGGER_R) {
+        isMode = !isMode;
+    }
+
+    cachedCrsfChannels.ch4 = (buttons & BUTTON_LEFT_MASK) || isArmed ? CRSF_CHANNEL_VALUE_2000 : CRSF_CHANNEL_VALUE_1000;
+    cachedCrsfChannels.ch5 = (buttons & BUTTON_RIGHT_MASK) || !isMode ? CRSF_CHANNEL_VALUE_2000 : CRSF_CHANNEL_VALUE_1000;
+    cachedCrsfChannels.ch6 = CRSF_CHANNEL_VALUE_1000;
+    cachedCrsfChannels.ch7 = CRSF_CHANNEL_VALUE_1000;
+    cachedCrsfChannels.ch8 = CRSF_CHANNEL_VALUE_1000;
+    cachedCrsfChannels.ch9 = CRSF_CHANNEL_VALUE_1000;
+    cachedCrsfChannels.ch10 = CRSF_CHANNEL_VALUE_1000;
+    cachedCrsfChannels.ch11 = CRSF_CHANNEL_VALUE_1000;
+    cachedCrsfChannels.ch12 = CRSF_CHANNEL_VALUE_1000;
+    cachedCrsfChannels.ch13 = CRSF_CHANNEL_VALUE_1000;
+    cachedCrsfChannels.ch14 = CRSF_CHANNEL_VALUE_1000;
+    cachedCrsfChannels.ch15 = CRSF_CHANNEL_VALUE_1000;
+}
+
+void sendChannels() {
+    Serial.print("Throttle: ");
+    Serial.print(cachedCrsfChannels.ch0);
+    Serial.print(", Yaw: ");
+    Serial.print(cachedCrsfChannels.ch1);
+    Serial.print(", Pitch: ");
+    Serial.print(cachedCrsfChannels.ch2);
+    Serial.print(", Roll: ");
+    Serial.print(cachedCrsfChannels.ch3);
+    Serial.print(", ARM: ");
+    Serial.print(cachedCrsfChannels.ch4);
+    Serial.print(", MODE: ");
+    Serial.println(cachedCrsfChannels.ch5);
+    Serial.println("");
+
+    crsfOut.writePacket(CRSF_SYNC_BYTE, CRSF_FRAMETYPE_RC_CHANNELS_PACKED, &cachedCrsfChannels, sizeof(cachedCrsfChannels));
+}
+
+void processGamepad(ControllerPtr ctl) {
+    updateChannels(ctl->axisX(), ctl->axisY(), ctl->axisRX(), ctl->axisRY(), ctl->buttons());
+    sendChannels();
+}
+
+void processControllers() {
+    for (auto myController : myControllers) {
+        if (myController && myController->isConnected() && myController->hasData()) {
+            if (myController->isGamepad()) {
+                led.turnON();
+                processGamepad(myController);
+            } else {
+                Serial.println("Unsupported controller");
+            }
+        }
+    }
+}
+
+void sendLQ() {
+    crsfLinkStatistics_t lq = {0};
+    lq.downlink_Link_quality = 100;
+    lq.uplink_Link_quality = 100;
+    lq.uplink_RSSI_1 = 100;
+    lq.uplink_RSSI_2 = 100;
+    lq.downlink_RSSI = 100;
+    crsfOut.writePacket(CRSF_SYNC_BYTE, CRSF_FRAMETYPE_LINK_STATISTICS, &lq, sizeof(lq));
+}
+
+// Arduino setup function. Runs in CPU 1
+void setup() {
+    Serial.begin(115200);
+    Serial.printf("Firmware: %s\n", BP32.firmwareVersion());
+    const uint8_t* addr = BP32.localBdAddress();
+    Serial.printf("BD Addr: %2X:%2X:%2X:%2X:%2X:%2X\n", addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+
+    // Setup the Bluepad32 callbacks
+    BP32.setup(&onConnectedController, &onDisconnectedController);
+
+    BP32.forgetBluetoothKeys();
+
+    BP32.enableVirtualDevice(false);
+
+    crsfSerialOut.begin(CRSF_BAUDRATE, SERIAL_8N1, PIN_RX_OUT, PIN_TX_OUT);
+    crsfOut.begin(crsfSerialOut);
+
+    Serial.println("CRSF Ready!");
+}
+
+// Arduino loop function. Runs in CPU 1.
+void loop() {
+    sendLQ();  // Avoid RX loss
+    bool dataUpdated = BP32.update();
+    if (dataUpdated) {
+        processControllers();
+    } else {
+        sendChannels();  // Send cached channels if no update
+    }
+    delay(50);
+}
