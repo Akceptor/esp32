@@ -1,0 +1,55 @@
+#include <HardwareSerial.h>
+
+#define CRSF_FRAMETYPE_RC_CHANNELS_PACKED  0x16
+#define CRSF_PACKET_LENGTH                 24  // 1 (Address) + 1 (Length) + 1 (Type) + 22 (Payload)
+#define PIN_RX 25  // Change this if using another RX pin
+#define PIN_TX -1  // Not needed, only reading
+
+HardwareSerial crsfSerial(1);  // Use UART1
+unsigned long lastPrintTime = 0;
+
+void setup() {
+    Serial.begin(115200);  // USB Serial Monitor
+    crsfSerial.begin(400000, SERIAL_8N1, PIN_RX, PIN_TX, true);  // Inverted UART for CRSF
+    Serial.println("CRSF Reader Initialized...");
+}
+
+void loop() {
+    static uint8_t buffer[CRSF_PACKET_LENGTH];
+    static uint8_t index = 0;
+    static uint16_t channels[16];
+
+    while (crsfSerial.available()) {
+        uint8_t byte = crsfSerial.read();
+
+        // Shift bytes into buffer
+        if (index == 0 && byte != 0xEE) continue;  // Wait for CRSF transmitter address
+        buffer[index++] = byte;
+
+        // When a full packet is received
+        if (index >= CRSF_PACKET_LENGTH) {
+            index = 0;  // Reset for next packet
+
+            // Validate the frame type
+            if (buffer[2] == CRSF_FRAMETYPE_RC_CHANNELS_PACKED) {
+                decodeCrsfChannels(buffer + 3, channels);
+            }
+        }
+    }
+
+    // Print only once per second
+    if (millis() - lastPrintTime >= 1000) {
+        lastPrintTime = millis();
+        Serial.printf("CH1 = %d, CH2 = %d, CH3 = %d, CH4 = %d, CH5 = %d\n", 
+                      channels[0], channels[1], channels[2], channels[3], channels[4]);
+    }
+}
+
+// Extract & store 16 RC channels from CRSF data
+void decodeCrsfChannels(uint8_t *data, uint16_t *channels) {
+    for (int i = 0; i < 16; i++) {
+        int byteIndex = (i * 11) / 8;
+        int bitOffset = (i * 11) % 8;
+        channels[i] = ((data[byteIndex] | (data[byteIndex + 1] << 8) | (data[byteIndex + 2] << 16)) >> bitOffset) & 0x7FF;
+    }
+}
