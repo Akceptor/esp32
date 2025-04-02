@@ -1,0 +1,141 @@
+#include <Arduino.h>
+
+// CRSF protocol definitions
+#define CRSF_BAUDRATE 420000
+#define CRSF_FRAME_SIZE_MAX 64
+#define CRSF_HEADER_SIZE 2
+#define CRSF_PAYLOAD_SIZE_MAX (CRSF_FRAME_SIZE_MAX - CRSF_HEADER_SIZE)
+#define CRSF_CHANNEL_VALUE_MIN 172
+#define CRSF_CHANNEL_VALUE_MID 992
+#define CRSF_CHANNEL_VALUE_MAX 1811
+#define CRSF_PAYLOAD_OFFSET 2
+
+// CRSF Frame Types
+#define CRSF_FRAMETYPE_RC_CHANNELS_PACKED 0x16
+
+// Hardware configuration
+#define CRSF_RX_PIN 25      // Connect S.Port to pin 25
+#define CRSF_TX_PIN 26      // Not used in this example, but defined for future use
+#define SERIAL_INVERTED true
+
+// Timing
+#define PRINT_INTERVAL 200  // Print interval in ms
+
+HardwareSerial CrsfSerial(1); // Use HardwareSerial1 for CRSF
+
+// CRSF Data structures
+typedef struct {
+  uint8_t device_addr;
+  uint8_t frame_type;
+  uint8_t payload[CRSF_PAYLOAD_SIZE_MAX];
+  uint8_t frame_size;
+} crsf_frame_t;
+
+crsf_frame_t crsf_frame;
+uint16_t channels[16]; // CRSF supports up to 16 channels
+unsigned long lastPrintTime = 0;
+
+// Function prototypes
+void setup_crsf_uart();
+void process_crsf_data();
+void parse_crsf_channels(uint8_t *payload, uint8_t payload_size);
+uint16_t convert_channel_value(uint16_t value);
+
+void setup() {
+  // Initialize main serial for debug output
+  Serial.begin(115200);
+  Serial.println("CRSF Reader Starting...");
+  
+  // Initialize CRSF serial port
+  setup_crsf_uart();
+}
+
+void loop() {
+  // Process incoming CRSF data
+  process_crsf_data();
+  
+  // Print channel values periodically
+  if (millis() - lastPrintTime > PRINT_INTERVAL) {
+    Serial.printf("CH1: %4d | CH2: %4d | CH3: %4d | CH4: %4d\n", 
+                 channels[0], channels[1], channels[2], channels[3]);
+    lastPrintTime = millis();
+  }
+}
+
+void setup_crsf_uart() {
+  // Initialize CRSF Serial with inverted signal
+  CrsfSerial.begin(CRSF_BAUDRATE, SERIAL_8N1, CRSF_RX_PIN, CRSF_TX_PIN, SERIAL_INVERTED);
+  Serial.println("CRSF UART Initialized");
+}
+
+void process_crsf_data() {
+  static uint8_t buffer[CRSF_FRAME_SIZE_MAX];
+  static uint8_t buffer_index = 0;
+  static uint8_t frame_size = 0;
+  
+  while (CrsfSerial.available()) {
+    uint8_t byte = CrsfSerial.read();
+    
+    // Check for a new frame
+    if (buffer_index == 0) {
+      // First byte is the frame size including type (len-2)
+      frame_size = byte + 2; // Add type and CRC bytes
+      if (frame_size > CRSF_FRAME_SIZE_MAX) {
+        // Invalid size
+        buffer_index = 0;
+        continue;
+      }
+      buffer[buffer_index++] = byte;
+    } else {
+      buffer[buffer_index++] = byte;
+      
+      // Check if we have a complete frame
+      if (buffer_index >= frame_size) {
+        // Process the frame if it's an RC channels frame
+        if (buffer[1] == CRSF_FRAMETYPE_RC_CHANNELS_PACKED) {
+          parse_crsf_channels(&buffer[CRSF_PAYLOAD_OFFSET], frame_size - CRSF_HEADER_SIZE - 1); // -1 for CRC
+        }
+        
+        // Reset for next frame
+        buffer_index = 0;
+        frame_size = 0;
+      }
+    }
+  }
+}
+
+void parse_crsf_channels(uint8_t *payload, uint8_t payload_size) {
+  if (payload_size < 22) {
+    return; // Not enough data for 16 channels
+  }
+  
+  // CRSF packs 11 bits per channel
+  // Transfer contents of payload buffer to 11-bit channel array
+  channels[0]  = ((payload[0] | payload[1] << 8) & 0x07FF);
+  channels[1]  = ((payload[1] >> 3 | payload[2] << 5) & 0x07FF);
+  channels[2]  = ((payload[2] >> 6 | payload[3] << 2 | payload[4] << 10) & 0x07FF);
+  channels[3]  = ((payload[4] >> 1 | payload[5] << 7) & 0x07FF);
+  channels[4]  = ((payload[5] >> 4 | payload[6] << 4) & 0x07FF);
+  channels[5]  = ((payload[6] >> 7 | payload[7] << 1 | payload[8] << 9) & 0x07FF);
+  channels[6]  = ((payload[8] >> 2 | payload[9] << 6) & 0x07FF);
+  channels[7]  = ((payload[9] >> 5 | payload[10] << 3) & 0x07FF);
+  channels[8]  = ((payload[11] | payload[12] << 8) & 0x07FF);
+  channels[9]  = ((payload[12] >> 3 | payload[13] << 5) & 0x07FF);
+  channels[10] = ((payload[13] >> 6 | payload[14] << 2 | payload[15] << 10) & 0x07FF);
+  channels[11] = ((payload[15] >> 1 | payload[16] << 7) & 0x07FF);
+  channels[12] = ((payload[16] >> 4 | payload[17] << 4) & 0x07FF);
+  channels[13] = ((payload[17] >> 7 | payload[18] << 1 | payload[19] << 9) & 0x07FF);
+  channels[14] = ((payload[19] >> 2 | payload[20] << 6) & 0x07FF);
+  channels[15] = ((payload[20] >> 5 | payload[21] << 3) & 0x07FF);
+  
+  // Optional: convert from CRSF range to a more standard 1000-2000us range
+  for (int i = 0; i < 16; i++) {
+    channels[i] = convert_channel_value(channels[i]);
+  }
+}
+
+uint16_t convert_channel_value(uint16_t value) {
+  // Convert CRSF raw value (172-1811) to a standard 1000-2000 range
+  // CRSF range is ~172 (min) to ~1811 (max) with mid at ~992
+  return map(value, CRSF_CHANNEL_VALUE_MIN, CRSF_CHANNEL_VALUE_MAX, 1000, 2000);
+}
