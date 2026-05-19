@@ -12,6 +12,7 @@
 #define OLED_SCL 22
 
 #define SIGNAL_PIN 25
+#define BUTTON_PIN 0
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
@@ -20,7 +21,9 @@ enum SignalType {
   PWM,
   PPM,
   SBUS_INV,
-  SBUS_NON_INV
+  SBUS_NON_INV,
+  CRSF,
+  CRSF_INV
 };
 
 volatile SignalType detected_type = NONE;
@@ -31,31 +34,43 @@ volatile unsigned long last_rising_time = 0;
 volatile uint32_t last_cycle_time = 0;
 volatile uint32_t last_high_duration = 0;
 
-volatile uint16_t channels[16] = {0};
+volatile uint16_t channels[8] = {0};
 
 volatile uint8_t current_channel = 0;
 volatile uint8_t pulse_counter = 0;
 
 volatile bool signal_detected = false;
 
-volatile uint16_t short_edge_counter = 0;
-volatile uint32_t last_short_edge_time = 0;
+volatile uint32_t sbus_valid_frame_count = 0;
+volatile uint32_t crsf_valid_frame_count = 0;
 
-volatile uint32_t valid_frame_count = 0;
-
-HardwareSerial SBUS_Serial(2);
+HardwareSerial SerialRX(2);
 
 bool serial_active = false;
-bool sbus_inversion_tested = false;
-
-unsigned long sbus_start_time = 0;
 
 float frequency = 0;
+
+// =========================================================
+// CRSF
+// =========================================================
+
+#define CRSF_BAUD 420000
+
+#define CRSF_ADDR_FLIGHT_CONTROLLER 0xC8
+#define CRSF_ADDR_RECEIVER          0xEC
+#define CRSF_ADDR_TRANSMITTER       0xEA
+
+#define CRSF_FRAME_RC_CHANNELS_PACKED 0x16
+#define CRSF_RC_CHANNEL_PAYLOAD_SIZE 22
+#define CRSF_RC_FRAME_LENGTH 24
+
+// =========================================================
+// Interrupt
+// =========================================================
 
 void IRAM_ATTR handleInterrupt() {
 
   uint32_t now = micros();
-
   uint32_t duration = now - last_edge_time;
 
   last_edge_time = now;
@@ -65,58 +80,35 @@ void IRAM_ATTR handleInterrupt() {
   signal_detected = true;
 
   // =========================================================
-  // Detect UART-like fast edges (possible SBUS)
-  // =========================================================
-
-  // SBUS bit width is 10us. Broaden window for interrupt jitter.
-  if (duration >= 2 && duration <= 30) {
-    // If edges are close together, count them as part of a serial stream
-    if (now - last_short_edge_time < 2000) {
-      short_edge_counter++;
-    } else {
-      short_edge_counter = 1;
-    }
-    last_short_edge_time = now;
-
-    // Strong evidence of SBUS stream
-    if (short_edge_counter > 40) {
-      detected_type = SBUS_NON_INV;
-    }
-  }
-
-  // =========================================================
   // Rising edge
   // =========================================================
 
   if (pinState) {
 
     // Sync gap
-    if (duration > 3000) {
-      // Only try to detect PPM/PWM if we aren't already in SBUS mode
-      if (detected_type == NONE || detected_type == PPM || detected_type == PWM) {
-        if (pulse_counter >= 3 && pulse_counter <= 18) {
-          detected_type = PPM;
-        } else if (pulse_counter == 1 || (pulse_counter == 0 && detected_type == NONE)) {
-          detected_type = PWM;
-        }
-      }
+
+    if (duration > 2500) {
 
       pulse_counter = 0;
       current_channel = 0;
     }
     else {
 
-      // PPM channel timing
-      if (detected_type == PPM && current_channel < 12) {
+      if (detected_type == PPM &&
+          current_channel < 8 &&
+          last_rising_time > 0) {
 
-        channels[current_channel] = now - last_rising_time;
+        channels[current_channel] =
+            now - last_rising_time;
 
         current_channel++;
       }
     }
 
     if (last_rising_time > 0) {
-      last_cycle_time = now - last_rising_time;
+
+      last_cycle_time =
+          now - last_rising_time;
     }
 
     last_rising_time = now;
@@ -132,22 +124,34 @@ void IRAM_ATTR handleInterrupt() {
 
     last_high_duration = duration;
 
-    // PWM pulse width
     if (detected_type == PWM) {
 
       channels[0] = duration;
     }
-
-    // Initial PWM detection
-    else if (detected_type == NONE &&
-             duration > 900 &&
-             duration < 2100 &&
-             short_edge_counter < 5) {
-
-      detected_type = PWM;
-    }
   }
 }
+
+// =========================================================
+// Shared unpacking
+// =========================================================
+
+bool unpackChannels(uint8_t *buffer) {
+
+  channels[0]  = ((buffer[0]       | buffer[1] << 8) & 0x07FF);
+  channels[1]  = ((buffer[1] >> 3  | buffer[2] << 5) & 0x07FF);
+  channels[2]  = ((buffer[2] >> 6  | buffer[3] << 2 | buffer[4] << 10) & 0x07FF);
+  channels[3]  = ((buffer[4] >> 1  | buffer[5] << 7) & 0x07FF);
+  channels[4]  = ((buffer[5] >> 4  | buffer[6] << 4) & 0x07FF);
+  channels[5]  = ((buffer[6] >> 7  | buffer[7] << 1 | buffer[8] << 9) & 0x07FF);
+  channels[6]  = ((buffer[8] >> 2  | buffer[9] << 6) & 0x07FF);
+  channels[7]  = ((buffer[9] >> 5  | buffer[10] << 3) & 0x07FF);
+
+  return true;
+}
+
+// =========================================================
+// SBUS
+// =========================================================
 
 bool decodeSBUSFrame(uint8_t *buffer) {
 
@@ -159,64 +163,154 @@ bool decodeSBUSFrame(uint8_t *buffer) {
     return false;
   }
 
-  channels[0]  = ((buffer[1]    | buffer[2] << 8) & 0x07FF);
-  channels[1]  = ((buffer[2] >> 3 | buffer[3] << 5) & 0x07FF);
-  channels[2]  = ((buffer[3] >> 6 | buffer[4] << 2 | buffer[5] << 10) & 0x07FF);
-  channels[3]  = ((buffer[5] >> 1 | buffer[6] << 7) & 0x07FF);
-  channels[4]  = ((buffer[6] >> 4 | buffer[7] << 4) & 0x07FF);
-  channels[5]  = ((buffer[7] >> 7 | buffer[8] << 1 | buffer[9] << 9) & 0x07FF);
-  channels[6]  = ((buffer[9] >> 2 | buffer[10] << 6) & 0x07FF);
-  channels[7]  = ((buffer[10] >> 5 | buffer[11] << 3) & 0x07FF);
-  channels[8]  = ((buffer[12] | buffer[13] << 8) & 0x07FF);
-  channels[9]  = ((buffer[13] >> 3 | buffer[14] << 5) & 0x07FF);
-  channels[10] = ((buffer[14] >> 6 | buffer[15] << 2 | buffer[16] << 10) & 0x07FF);
-  channels[11] = ((buffer[16] >> 1 | buffer[17] << 7) & 0x07FF);
-  channels[12] = ((buffer[17] >> 4 | buffer[18] << 4) & 0x07FF);
-  channels[13] = ((buffer[18] >> 7 | buffer[19] << 1 | buffer[20] << 9) & 0x07FF);
-  channels[14] = ((buffer[20] >> 2 | buffer[21] << 6) & 0x07FF);
-  channels[15] = ((buffer[21] >> 5 | buffer[22] << 3) & 0x07FF);
-
-  return true;
+  return unpackChannels(&buffer[1]);
 }
 
 void decodeSBUS() {
 
-  while (SBUS_Serial.available() >= 25) {
+  while (SerialRX.available() >= 25) {
 
-    if (SBUS_Serial.peek() != 0x0F) {
-      SBUS_Serial.read();
+    if (SerialRX.peek() != 0x0F) {
+
+      SerialRX.read();
       continue;
     }
 
     uint8_t buffer[25];
 
-    for (int i = 0; i < 25; i++) {
-      buffer[i] = SBUS_Serial.read();
+    if (SerialRX.readBytes(buffer, 25) != 25) {
+      return;
     }
 
     if (decodeSBUSFrame(buffer)) {
 
-      valid_frame_count++;
+      sbus_valid_frame_count++;
 
       signal_detected = true;
 
       last_edge_time = micros();
-
-      // Successfully decoded
-      if (detected_type == SBUS_NON_INV ||
-          detected_type == SBUS_INV) {
-      }
     }
   }
 }
 
+// =========================================================
+// CRSF CRC8 DVB-S2
+// =========================================================
+
+uint8_t crsf_crc8(const uint8_t *ptr, uint8_t len) {
+
+  uint8_t crc = 0;
+
+  while (len--) {
+
+    crc ^= *ptr++;
+
+    for (uint8_t i = 0; i < 8; i++) {
+
+      if (crc & 0x80) {
+        crc = (crc << 1) ^ 0xD5;
+      }
+      else {
+        crc <<= 1;
+      }
+    }
+  }
+
+  return crc;
+}
+
+// =========================================================
+// CRSF
+// =========================================================
+
+void decodeCRSF() {
+
+  while (SerialRX.available() >= 4) {
+
+    uint8_t addr = SerialRX.peek();
+
+    if (
+      addr != CRSF_ADDR_FLIGHT_CONTROLLER &&
+      addr != CRSF_ADDR_RECEIVER &&
+      addr != CRSF_ADDR_TRANSMITTER
+    ) {
+
+      SerialRX.read();
+      continue;
+    }
+
+    // Address
+
+    uint8_t device_addr = SerialRX.read();
+
+    // Length
+
+    if (SerialRX.available() < 1) {
+      return;
+    }
+
+    uint8_t frame_length = SerialRX.read();
+
+    if (frame_length < 2 || frame_length > 62) {
+      continue;
+    }
+
+    if (SerialRX.available() < frame_length) {
+      return;
+    }
+
+    uint8_t frame_buffer[64];
+
+    if (SerialRX.readBytes(frame_buffer, frame_length) != frame_length) {
+      return;
+    }
+
+    uint8_t frame_type =
+        frame_buffer[0];
+
+    uint8_t received_crc =
+        frame_buffer[frame_length - 1];
+
+    // CRC over Type + Payload
+
+    uint8_t calculated_crc =
+        crsf_crc8(frame_buffer, frame_length - 1);
+
+    if (calculated_crc != received_crc) {
+      continue;
+    }
+
+    // RC Channels
+
+    if (
+      frame_type == CRSF_FRAME_RC_CHANNELS_PACKED &&
+      frame_length == CRSF_RC_FRAME_LENGTH
+    ) {
+
+      unpackChannels(&frame_buffer[1]);
+
+      crsf_valid_frame_count++;
+
+      signal_detected = true;
+
+      last_edge_time = micros();
+    }
+  }
+}
+
+// =========================================================
+// Start/Stop Serial
+// =========================================================
+
 void startSBUS(bool inverted) {
 
-  SBUS_Serial.end();
+  SerialRX.end();
+
+  detachInterrupt(digitalPinToInterrupt(SIGNAL_PIN));
 
   delay(20);
 
-  SBUS_Serial.begin(
+  SerialRX.begin(
     100000,
     SERIAL_8E2,
     SIGNAL_PIN,
@@ -224,28 +318,50 @@ void startSBUS(bool inverted) {
     inverted
   );
 
-  detected_type = inverted ? SBUS_INV : SBUS_NON_INV;
+  detected_type =
+      inverted
+      ? SBUS_INV
+      : SBUS_NON_INV;
 
   serial_active = true;
 
-  sbus_start_time = millis();
-
-  valid_frame_count = 0;
+  sbus_valid_frame_count = 0;
 }
 
-void stopSBUS() {
+void startCRSF(bool inverted) {
 
-  SBUS_Serial.end();
+  SerialRX.end();
+
+  detachInterrupt(digitalPinToInterrupt(SIGNAL_PIN));
+
+  delay(20);
+
+  SerialRX.begin(
+    CRSF_BAUD,
+    SERIAL_8N1,
+    SIGNAL_PIN,
+    -1,
+    inverted
+  );
+
+  detected_type =
+      inverted
+      ? CRSF_INV
+      : CRSF;
+
+  serial_active = true;
+
+  crsf_valid_frame_count = 0;
+}
+
+void stopSerialMode() {
+
+  SerialRX.end();
 
   serial_active = false;
 
-  detected_type = NONE;
-
-  short_edge_counter = 0;
-
-  valid_frame_count = 0;
-
-  sbus_inversion_tested = false;
+  sbus_valid_frame_count = 0;
+  crsf_valid_frame_count = 0;
 
   attachInterrupt(
     digitalPinToInterrupt(SIGNAL_PIN),
@@ -254,6 +370,50 @@ void stopSBUS() {
   );
 }
 
+// =========================================================
+// Mode cycle
+// =========================================================
+
+void cycleMode() {
+
+  if (serial_active) {
+    stopSerialMode();
+  }
+
+  if (detected_type == PWM) {
+
+    detected_type = PPM;
+  }
+  else if (detected_type == PPM) {
+
+    startSBUS(false);
+  }
+  else if (detected_type == SBUS_NON_INV) {
+
+    startSBUS(true);
+  }
+  else if (detected_type == SBUS_INV) {
+
+    startCRSF(false);
+  }
+  else if (detected_type == CRSF) {
+
+    startCRSF(true);
+  }
+  else if (detected_type == CRSF_INV) {
+
+    detected_type = PWM;
+  }
+  else {
+
+    detected_type = PWM;
+  }
+}
+
+// =========================================================
+// Setup
+// =========================================================
+
 void setup() {
 
   Serial.begin(115200);
@@ -261,8 +421,6 @@ void setup() {
   Wire.begin(OLED_SDA, OLED_SCL);
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-
-    Serial.println("SSD1306 allocation failed");
 
     while (true);
   }
@@ -275,6 +433,10 @@ void setup() {
 
   pinMode(SIGNAL_PIN, INPUT);
 
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  detected_type = PWM;
+
   attachInterrupt(
     digitalPinToInterrupt(SIGNAL_PIN),
     handleInterrupt,
@@ -282,68 +444,68 @@ void setup() {
   );
 }
 
+// =========================================================
+// Loop
+// =========================================================
+
 void loop() {
 
   // =========================================================
-  // Enter SBUS mode
+  // Button
   // =========================================================
 
-  if (detected_type == SBUS_NON_INV &&
-      !serial_active) {
+  static bool lastButtonState = HIGH;
 
-    detachInterrupt(digitalPinToInterrupt(SIGNAL_PIN));
+  bool currentButtonState =
+      digitalRead(BUTTON_PIN);
 
-    startSBUS(false);
+  if (
+    lastButtonState == HIGH &&
+    currentButtonState == LOW
+  ) {
+
+    cycleMode();
+
+    delay(150);
   }
 
+  lastButtonState = currentButtonState;
+
   // =========================================================
-  // Decode SBUS
+  // Decode serial protocols
   // =========================================================
 
   if (serial_active) {
 
-    decodeSBUS();
+    if (
+      detected_type == SBUS_NON_INV ||
+      detected_type == SBUS_INV
+    ) {
 
-    // No valid packets?
-    // Retry with inversion enabled
-    if (!sbus_inversion_tested &&
-        valid_frame_count == 0 &&
-        millis() - sbus_start_time > 150) {
-
-      sbus_inversion_tested = true;
-
-      startSBUS(true);
+      decodeSBUS();
     }
+    else if (
+      detected_type == CRSF ||
+      detected_type == CRSF_INV
+    ) {
 
-    // Still nothing -> give up
-    if (valid_frame_count == 0 &&
-        millis() - sbus_start_time > 400) {
-
-      stopSBUS();
+      decodeCRSF();
     }
   }
 
   // =========================================================
-  // Signal timeout
+  // Timeout
   // =========================================================
 
   if (micros() - last_edge_time > 500000) {
 
-    detected_type = NONE;
-
     pulse_counter = 0;
 
-    short_edge_counter = 0;
-
     current_channel = 0;
-
-    if (serial_active) {
-      stopSBUS();
-    }
   }
 
   // =========================================================
-  // OLED update
+  // OLED
   // =========================================================
 
   static uint32_t last_update = 0;
@@ -356,17 +518,56 @@ void loop() {
 
     display.setCursor(0, 0);
 
-    if (!signal_detected ||
-        micros() - last_edge_time > 200000) {
+    bool validSignal =
+        signal_detected &&
+        (micros() - last_edge_time < 200000);
 
-      signal_detected = false;
+    if (!validSignal) {
+
       display.println("No Signal");
+
+      display.print("Type: ");
+
+      switch (detected_type) {
+
+        case PWM:
+          display.println("PWM");
+          break;
+
+        case PPM:
+          display.println("PPM");
+          break;
+
+        case SBUS_NON_INV:
+          display.println("SBUS");
+          break;
+
+        case SBUS_INV:
+          display.println("SBUS INV");
+          break;
+
+        case CRSF:
+          display.println("CRSF");
+          break;
+
+        case CRSF_INV:
+          display.println("CRSF INV");
+          break;
+
+        default:
+          display.println("NONE");
+          break;
+      }
     }
     else {
 
       display.print("Type: ");
 
       switch (detected_type) {
+
+        // =====================================================
+        // PWM
+        // =====================================================
 
         case PWM:
 
@@ -387,6 +588,10 @@ void loop() {
 
           break;
 
+        // =====================================================
+        // PPM
+        // =====================================================
+
         case PPM:
 
           display.println("PPM");
@@ -394,7 +599,6 @@ void loop() {
           for (int i = 0; i < 8; i++) {
 
             int col = (i % 2) * 64;
-
             int row = 16 + (i / 2) * 10;
 
             display.setCursor(col, row);
@@ -402,20 +606,27 @@ void loop() {
             display.print("CH");
             display.print(i + 1);
             display.print(":");
-
             display.print(channels[i]);
           }
 
           break;
+
+        // =====================================================
+        // SBUS
+        // =====================================================
 
         case SBUS_NON_INV:
+        case SBUS_INV:
 
-          display.println("SBUS");
+          display.println(
+            detected_type == SBUS_INV
+            ? "SBUS INV"
+            : "SBUS"
+          );
 
           for (int i = 0; i < 8; i++) {
 
             int col = (i % 2) * 64;
-
             int row = 16 + (i / 2) * 10;
 
             display.setCursor(col, row);
@@ -423,25 +634,32 @@ void loop() {
             display.print("C");
             display.print(i + 1);
             display.print(":");
-
             display.print(channels[i]);
           }
 
           display.setCursor(0, 56);
 
           display.print("PKT:");
-          display.print(valid_frame_count);
+          display.print(sbus_valid_frame_count);
 
           break;
 
-        case SBUS_INV:
+        // =====================================================
+        // CRSF
+        // =====================================================
 
-          display.println("SBUS INV");
+        case CRSF:
+        case CRSF_INV:
+
+          display.println(
+            detected_type == CRSF_INV
+            ? "CRSF INV"
+            : "CRSF"
+          );
 
           for (int i = 0; i < 8; i++) {
 
             int col = (i % 2) * 64;
-
             int row = 16 + (i / 2) * 10;
 
             display.setCursor(col, row);
@@ -449,20 +667,19 @@ void loop() {
             display.print("C");
             display.print(i + 1);
             display.print(":");
-
             display.print(channels[i]);
           }
 
           display.setCursor(0, 56);
 
           display.print("PKT:");
-          display.print(valid_frame_count);
+          display.print(crsf_valid_frame_count);
 
           break;
 
         default:
 
-          display.println("Scanning...");
+          display.println("Unknown");
 
           break;
       }
